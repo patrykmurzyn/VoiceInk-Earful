@@ -41,6 +41,7 @@ class TranscriptionPipeline {
         audioURL: URL,
         model: any TranscriptionModel,
         session: TranscriptionSession?,
+        prebuiltText: String? = nil,
         onStateChange: @escaping (RecordingState) -> Void,
         shouldCancel: () -> Bool,
         onCleanup: @escaping () async -> Void,
@@ -58,12 +59,20 @@ class TranscriptionPipeline {
         do {
             let transcriptionStart = Date()
             var text: String
-            if let session {
+            let isPrebuilt = (prebuiltText != nil)
+            if let prebuiltText {
+                text = prebuiltText
+            } else if let session {
                 text = try await session.transcribe(audioURL: audioURL)
             } else {
                 text = try await serviceRegistry.transcribe(audioURL: audioURL, model: model)
             }
-            text = TranscriptionOutputFilter.filter(text)
+            // Skip transcript cleanup heuristics for prebuilt text: they assume
+            // raw whisper output (e.g. strip `[BLANK_AUDIO]`-style brackets) and
+            // would mangle the `[ME]:` / `[THEM]:` labels we deliberately added.
+            if !isPrebuilt {
+                text = TranscriptionOutputFilter.filter(text)
+            }
             let transcriptionDuration = Date().timeIntervalSince(transcriptionStart)
 
             let powerModeManager = PowerModeManager.shared
@@ -75,12 +84,17 @@ class TranscriptionPipeline {
 
             text = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            if UserDefaults.standard.bool(forKey: "IsTextFormattingEnabled") {
+            if !isPrebuilt && UserDefaults.standard.bool(forKey: "IsTextFormattingEnabled") {
                 text = WhisperTextFormatter.format(text)
             }
 
-            text = WordReplacementService.shared.applyReplacements(to: text, using: modelContext)
-            let cleanedText = TranscriptionOutputFilter.applyUserCleanupPreferences(text)
+            let cleanedText: String
+            if isPrebuilt {
+                cleanedText = text
+            } else {
+                text = WordReplacementService.shared.applyReplacements(to: text, using: modelContext)
+                cleanedText = TranscriptionOutputFilter.applyUserCleanupPreferences(text)
+            }
 
             let audioAsset = AVURLAsset(url: audioURL)
             let actualDuration = (try? CMTimeGetSeconds(await audioAsset.load(.duration))) ?? 0.0
@@ -93,7 +107,7 @@ class TranscriptionPipeline {
             transcription.powerModeEmoji = powerModeEmoji
             finalPastedText = cleanedText
 
-            if let enhancementService, enhancementService.isConfigured {
+            if prebuiltText == nil, let enhancementService, enhancementService.isConfigured {
                 let detectionResult = await promptDetectionService.analyzeText(text, with: enhancementService)
                 promptDetectionResult = detectionResult
                 await promptDetectionService.applyDetectionResult(detectionResult, to: enhancementService)
@@ -104,7 +118,10 @@ class TranscriptionPipeline {
             let shortEnhancementWordThreshold = savedThreshold > 0 ? savedThreshold : 3
             let shouldSkipEnhancement = isSkipShortEnhancementEnabled && WordCounter.count(in: text) <= shortEnhancementWordThreshold && !(promptDetectionResult?.shouldEnableAI == true)
 
-            if let enhancementService,
+            // Mixed-mode produces labeled text ([ME]/[THEM]) that the LLM
+            // enhancement step would smush into a plain paragraph — skip it.
+            if prebuiltText == nil,
+               let enhancementService,
                enhancementService.isEnhancementEnabled,
                enhancementService.isConfigured,
                !shouldSkipEnhancement {

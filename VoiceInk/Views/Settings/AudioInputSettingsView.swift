@@ -30,8 +30,12 @@ struct AudioInputSettingsView: View {
                 case .prioritized:
                     prioritizedDevicesSection
                 }
-            } else {
+            }
+
+            if sourceMode == .systemAudio {
                 systemAudioInfoSection
+            } else if sourceMode == .mixed {
+                mixedInfoSection
             }
         }
         .padding(.horizontal, 32)
@@ -66,6 +70,26 @@ struct AudioInputSettingsView: View {
                     Text("Capturing system audio")
                         .font(.headline)
                     Text("Audio playing through your speakers will be transcribed. Pause Media and Mute System Audio are automatically disabled while this source is active. Requires Screen & System Audio Recording permission.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding()
+            .background(CardBackground(isSelected: false))
+        }
+    }
+
+    private var mixedInfoSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "info.circle.fill")
+                    .foregroundStyle(.blue)
+                    .font(.system(size: 18))
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Mic + System Audio")
+                        .font(.headline)
+                    Text("Records your microphone and system audio in parallel. Transcription tags each segment with [ME] (mic) or [THEM] (system). Requires Screen & System Audio Recording permission. Whisper-based models only.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

@@ -28,7 +28,7 @@ actor WhisperContext {
         }
     }
 
-    func fullTranscribe(samples: [Float]) -> Bool {
+    func fullTranscribe(samples: [Float], disableVAD: Bool = false) -> Bool {
         guard let context = context else { return false }
         
         let maxThreads = max(1, min(8, cpuCount() - 2))
@@ -69,8 +69,11 @@ actor WhisperContext {
 
         whisper_reset_timings(context)
         
-        // Configure VAD if enabled by user and model is available
-        let isVADEnabled = UserDefaults.standard.bool(forKey: "IsVADEnabled")
+        // Configure VAD if enabled by user and model is available. Mixed-mode
+        // transcription disables VAD because its `max_speech_duration_s = ∞`
+        // setting collapses an entire speaker's audio into a single segment,
+        // which would destroy the timestamp-based interleaving downstream.
+        let isVADEnabled = !disableVAD && UserDefaults.standard.bool(forKey: "IsVADEnabled")
         if isVADEnabled, let vadModelPath = self.vadModelPath {
             params.vad = true
             params.vad_model_path = (vadModelPath as NSString).utf8String
@@ -108,6 +111,24 @@ actor WhisperContext {
             transcription += String(cString: whisper_full_get_segment_text(context, i))
         }
         return transcription
+    }
+
+    /// Segments produced by the most recent `fullTranscribe` call, with the
+    /// timestamps reported by whisper.cpp (milliseconds, relative to the
+    /// start of the supplied samples).
+    func getSegments() -> [WhisperSegment] {
+        guard let context = context else { return [] }
+        let count = whisper_full_n_segments(context)
+        var segments: [WhisperSegment] = []
+        segments.reserveCapacity(Int(count))
+        for i in 0..<count {
+            let t0 = whisper_full_get_segment_t0(context, i)
+            let t1 = whisper_full_get_segment_t1(context, i)
+            let text = String(cString: whisper_full_get_segment_text(context, i))
+            // whisper.cpp timestamps are in centiseconds (10ms units), not ms.
+            segments.append(WhisperSegment(t0Ms: t0 * 10, t1Ms: t1 * 10, text: text))
+        }
+        return segments
     }
 
     static func createContext(path: String) async throws -> WhisperContext {
@@ -162,4 +183,12 @@ actor WhisperContext {
 
 fileprivate func cpuCount() -> Int {
     ProcessInfo.processInfo.processorCount
+}
+
+/// Single transcription segment with timestamps in milliseconds relative to
+/// the start of the input audio.
+struct WhisperSegment: Sendable {
+    let t0Ms: Int64
+    let t1Ms: Int64
+    let text: String
 }

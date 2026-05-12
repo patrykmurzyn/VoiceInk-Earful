@@ -260,11 +260,38 @@ class VoiceInkEngine: NSObject, ObservableObject {
         let session = currentSession
         currentSession = nil
 
+        var prebuiltText: String? = nil
+        if let companionURL = recorder.companionAudioURL {
+            if model.provider == .whisper {
+                do {
+                    let mixedTranscriber = MixedTranscriber(modelProvider: whisperModelManager)
+                    prebuiltText = try await mixedTranscriber.transcribe(
+                        micURL: audioURL,
+                        systemURL: companionURL,
+                        model: model
+                    )
+                } catch {
+                    logger.error("Mixed-mode transcription failed: \(error.localizedDescription, privacy: .public)")
+                    transcription.text = "Transcription Failed: \(error.localizedDescription)"
+                    transcription.transcriptionStatus = TranscriptionStatus.failed.rawValue
+                    try? modelContext.save()
+                    await recorderUIManager?.dismissMiniRecorder()
+                    recordingState = .idle
+                    return
+                }
+            } else {
+                logger.notice("Mixed mode requires a Whisper model; falling back to standard transcription on mic stream only.")
+            }
+            // Companion file is consumed for transcription; remove afterwards.
+            try? FileManager.default.removeItem(at: companionURL)
+        }
+
         await pipeline.run(
             transcription: transcription,
             audioURL: audioURL,
             model: model,
             session: session,
+            prebuiltText: prebuiltText,
             onStateChange: { [weak self] state in self?.recordingState = state },
             shouldCancel: { [weak self] in self?.shouldCancelRecording ?? false },
             onCleanup: { [weak self] in await self?.cleanupResources() },

@@ -28,7 +28,13 @@ class Recorder: NSObject, ObservableObject {
     var onAudioChunk: ((_ data: Data) -> Void)? {
         didSet { recorder?.onAudioChunk = onAudioChunk }
     }
-    
+
+    /// Companion WAV produced alongside the primary recording (system-audio
+    /// stream when in mixed mode). Captured at start and persisted across
+    /// `stopRecording` so callers can consume it during transcription.
+    /// `nil` for single-source modes.
+    private(set) var companionAudioURL: URL?
+
     enum RecorderError: Error {
         case couldNotStartRecording
     }
@@ -97,7 +103,8 @@ class Recorder: NSObject, ObservableObject {
     }
 
     func scheduleSystemMute(afterDelayNanoseconds delay: UInt64 = 250_000_000) {
-        guard AudioSourceMode.current != .systemAudio else { return }
+        let mode = AudioSourceMode.current
+        guard mode != .systemAudio, mode != .mixed else { return }
         audioMuteTask?.cancel()
         audioMuteTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: delay)
@@ -109,6 +116,7 @@ class Recorder: NSObject, ObservableObject {
     func startRecording(toOutputFile url: URL) async throws {
         logger.notice("startRecording called – deviceID=\(self.deviceManager.getCurrentDevice(), privacy: .public), file=\(url.lastPathComponent, privacy: .public)")
         deviceManager.isRecordingActive = true
+        companionAudioURL = nil
 
         let currentDeviceID = deviceManager.getCurrentDevice()
         let lastDeviceID = UserDefaults.standard.string(forKey: "lastUsedMicrophoneDeviceID")
@@ -137,6 +145,17 @@ class Recorder: NSObject, ObservableObject {
             coreAudioRecorder.preferredDeviceID = deviceID
             coreAudioRecorder.onAudioChunk = onAudioChunk
             captureSource = coreAudioRecorder
+        case .mixed:
+            if #available(macOS 13.0, *) {
+                let mixedRecorder = MixedAudioRecorder(micDeviceID: deviceID)
+                mixedRecorder.onAudioChunk = onAudioChunk
+                captureSource = mixedRecorder
+            } else {
+                let coreAudioRecorder = CoreAudioRecorder()
+                coreAudioRecorder.preferredDeviceID = deviceID
+                coreAudioRecorder.onAudioChunk = onAudioChunk
+                captureSource = coreAudioRecorder
+            }
         }
         recorder = captureSource
         logger.notice("startRecording: source=\(sourceMode.rawValue, privacy: .public) file=\(url.lastPathComponent, privacy: .public)")
@@ -154,6 +173,10 @@ class Recorder: NSObject, ObservableObject {
                 }
             }
             logger.notice("startRecording: capture source started successfully")
+
+            if #available(macOS 13.0, *), let mixed = captureSource as? MixedAudioRecorder {
+                companionAudioURL = mixed.systemFileURL
+            }
 
             startAudioMeterTimer()
             if sourceMode == .microphone {
