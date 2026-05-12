@@ -462,6 +462,7 @@ struct ExperimentalSection: View {
     @ObservedObject private var playbackController = PlaybackController.shared
     @ObservedObject private var mediaController = MediaController.shared
     @State private var isPauseMediaExpanded = false
+    @AppStorage(AudioSourceMode.userDefaultsKey) private var sourceMode: AudioSourceMode = .microphone
 
     var body: some View {
         Section {
@@ -469,7 +470,9 @@ struct ExperimentalSection: View {
                 isExpanded: $isPauseMediaExpanded,
                 isEnabled: $playbackController.isPauseMediaEnabled,
                 label: "Pause Media While Recording",
-                infoMessage: "Pauses playing media when recording starts and resumes when done."
+                infoMessage: sourceMode == .microphone
+                    ? "Pauses playing media when recording starts and resumes when done."
+                    : "Disabled automatically while \(sourceMode.displayName) source is active."
             ) {
                 Picker("Resume Delay", selection: $mediaController.audioResumptionDelay) {
                     Text("0s").tag(0.0)
@@ -480,6 +483,8 @@ struct ExperimentalSection: View {
                     Text("5s").tag(5.0)
                 }
             }
+            .disabled(sourceMode != .microphone)
+            .opacity(sourceMode != .microphone ? 0.5 : 1.0)
         } header: {
             Text("Experimental")
         }

@@ -97,6 +97,7 @@ class Recorder: NSObject, ObservableObject {
     }
 
     func scheduleSystemMute(afterDelayNanoseconds delay: UInt64 = 250_000_000) {
+        guard AudioSourceMode.current != .systemAudio else { return }
         audioMuteTask?.cancel()
         audioMuteTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: delay)
@@ -124,29 +125,42 @@ class Recorder: NSObject, ObservableObject {
         audioRestorationTask = nil
         audioMeterUpdateTimer?.cancel()
 
-        let coreAudioRecorder = CoreAudioRecorder()
-        coreAudioRecorder.preferredDeviceID = deviceID
-        coreAudioRecorder.onAudioChunk = onAudioChunk
-        recorder = coreAudioRecorder
+        let sourceMode = AudioSourceMode.current
+        let captureSource: any AudioCaptureSource
+        switch sourceMode {
+        case .systemAudio:
+            let sysRecorder = SystemAudioRecorder()
+            sysRecorder.onAudioChunk = onAudioChunk
+            captureSource = sysRecorder
+        case .microphone:
+            let coreAudioRecorder = CoreAudioRecorder()
+            coreAudioRecorder.preferredDeviceID = deviceID
+            coreAudioRecorder.onAudioChunk = onAudioChunk
+            captureSource = coreAudioRecorder
+        }
+        recorder = captureSource
+        logger.notice("startRecording: source=\(sourceMode.rawValue, privacy: .public) file=\(url.lastPathComponent, privacy: .public)")
 
         do {
             // Offload initialization to background thread to avoid hotkey lag.
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 audioSetupQueue.async {
                     do {
-                        try coreAudioRecorder.start(toOutputFile: url)
+                        try captureSource.start(toOutputFile: url)
                         continuation.resume()
                     } catch {
                         continuation.resume(throwing: error)
                     }
                 }
             }
-            logger.notice("startRecording: CoreAudioRecorder started successfully")
+            logger.notice("startRecording: capture source started successfully")
 
             startAudioMeterTimer()
-            Task { [weak self] in
-                guard let self else { return }
-                await self.playbackController.pauseMedia()
+            if sourceMode == .microphone {
+                Task { [weak self] in
+                    guard let self else { return }
+                    await self.playbackController.pauseMedia()
+                }
             }
         } catch {
             logger.error("Failed to start recording: \(error.localizedDescription, privacy: .public)")
@@ -181,9 +195,11 @@ class Recorder: NSObject, ObservableObject {
 
         audioMeter = AudioMeter(averagePower: 0, peakPower: 0)
 
-        audioRestorationTask = Task {
-            await mediaController.unmuteSystemAudio()
-            await playbackController.resumeMedia()
+        if AudioSourceMode.current == .microphone {
+            audioRestorationTask = Task {
+                await mediaController.unmuteSystemAudio()
+                await playbackController.resumeMedia()
+            }
         }
         deviceManager.isRecordingActive = false
     }
