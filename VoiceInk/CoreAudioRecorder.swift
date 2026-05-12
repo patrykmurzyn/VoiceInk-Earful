@@ -18,6 +18,8 @@ final class CoreAudioRecorder: @unchecked Sendable {
     private var currentDeviceID: AudioDeviceID = 0
     private var recordingURL: URL?
 
+    var preferredDeviceID: AudioDeviceID = 0
+
     // Device format (what the hardware provides)
     private var deviceFormat = AudioStreamBasicDescription()
     // Output format (16kHz mono PCM Int16 for transcription)
@@ -910,5 +912,15 @@ enum CoreAudioRecorderError: LocalizedError {
         case .failedToStart(let status):
             return "Failed to start AudioUnit: \(status)"
         }
+    }
+}
+
+extension CoreAudioRecorder: AudioCaptureSource {
+    func start(toOutputFile url: URL) throws {
+        try startRecording(toOutputFile: url, deviceID: preferredDeviceID)
+    }
+
+    func stop() {
+        stopRecording()
     }
 }

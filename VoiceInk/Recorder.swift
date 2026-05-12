@@ -5,7 +5,7 @@ import os
 
 @MainActor
 class Recorder: NSObject, ObservableObject {
-    private var recorder: CoreAudioRecorder?
+    private var recorder: (any AudioCaptureSource)?
     private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "Recorder")
     private let deviceManager = AudioDeviceManager.shared
     private var deviceSwitchObserver: NSObjectProtocol?
@@ -24,7 +24,7 @@ class Recorder: NSObject, ObservableObject {
     private var smoothedPeak: Float = 0
 
     /// Audio chunk callback for streaming. Can be updated while recording;
-    /// changes are forwarded to the live CoreAudioRecorder.
+    /// changes are forwarded to the live capture source.
     var onAudioChunk: ((_ data: Data) -> Void)? {
         didSet { recorder?.onAudioChunk = onAudioChunk }
     }
@@ -52,7 +52,7 @@ class Recorder: NSObject, ObservableObject {
 
     private func handleDeviceSwitchRequired(_ notification: Notification) async {
         guard !isReconfiguring else { return }
-        guard let recorder = recorder else { return }
+        guard let micRecorder = recorder as? CoreAudioRecorder else { return }
         guard let userInfo = notification.userInfo,
               let newDeviceID = userInfo["newDeviceID"] as? AudioDeviceID else {
             logger.error("Device switch notification missing newDeviceID")
@@ -69,7 +69,7 @@ class Recorder: NSObject, ObservableObject {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 audioSetupQueue.async {
                     do {
-                        try recorder.switchDevice(to: newDeviceID)
+                        try micRecorder.switchDevice(to: newDeviceID)
                         continuation.resume()
                     } catch {
                         continuation.resume(throwing: error)
@@ -125,6 +125,7 @@ class Recorder: NSObject, ObservableObject {
         audioMeterUpdateTimer?.cancel()
 
         let coreAudioRecorder = CoreAudioRecorder()
+        coreAudioRecorder.preferredDeviceID = deviceID
         coreAudioRecorder.onAudioChunk = onAudioChunk
         recorder = coreAudioRecorder
 
@@ -133,7 +134,7 @@ class Recorder: NSObject, ObservableObject {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 audioSetupQueue.async {
                     do {
-                        try coreAudioRecorder.startRecording(toOutputFile: url, deviceID: deviceID)
+                        try coreAudioRecorder.start(toOutputFile: url)
                         continuation.resume()
                     } catch {
                         continuation.resume(throwing: error)
@@ -168,7 +169,7 @@ class Recorder: NSObject, ObservableObject {
 
         await withCheckedContinuation { continuation in
             audioSetupQueue.async {
-                currentRecorder?.stopRecording()
+                currentRecorder?.stop()
                 continuation.resume()
             }
         }
