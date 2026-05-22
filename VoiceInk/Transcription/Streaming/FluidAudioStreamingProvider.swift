@@ -24,8 +24,14 @@ final class FluidAudioStreamingProvider: StreamingTranscriptionProvider {
 
     private var transcriptionTask: Task<Void, Never>?
     private var isTranscribing = false
+    private let transcriptionStateLock = NSLock()
     private var lastTranscribedSampleCount = 0
     private let minNewSamples = 8000 // ~0.5s
+
+    private enum RemainingAudioTranscription {
+        case unavailable
+        case transcribed(String)
+    }
 
     init(fluidAudioService: FluidAudioTranscriptionService, config: AgreementConfig = AgreementConfig()) {
         self.fluidAudioService = fluidAudioService
@@ -75,8 +81,43 @@ final class FluidAudioStreamingProvider: StreamingTranscriptionProvider {
         transcriptionTask = nil
 
         // Run a clean final ASR pass on the unconfirmed audio portion.
-        let remainingText = await transcribeRemainingAudio() ?? ""
+        switch await transcribeRemainingAudio() {
+        case .transcribed(let remainingText):
+            eventsContinuation?.yield(.committed(text: remainingText))
+        case .unavailable:
+            eventsContinuation?.yield(.committed(text: ""))
+        }
+    }
+
+    /// Finalizes the currently active audio segment and starts the agreement
+    /// engine from a clean boundary. Mixed mic+system live transcription uses
+    /// this when voice activity detects a pause or an oversized chat bubble.
+    func forceSegmentBoundary() async throws {
+        guard await waitForTranscriptionSlot() else { return }
+        defer { endExclusiveTranscription() }
+
+        let boundarySample: Int
+        bufferLock.lock()
+        boundarySample = trimmedSampleCount + audioBuffer.count
+        bufferLock.unlock()
+
+        let transcription = await transcribeRemainingAudio(upToAbsoluteSample: boundarySample)
+        guard case .transcribed(let remainingText) = transcription else {
+            return
+        }
+
         eventsContinuation?.yield(.committed(text: remainingText))
+
+        bufferLock.lock()
+        let samplesToTrim = min(max(0, boundarySample - trimmedSampleCount), audioBuffer.count)
+        if samplesToTrim > 0 {
+            audioBuffer.removeFirst(samplesToTrim)
+            trimmedSampleCount += samplesToTrim
+        }
+        lastTranscribedSampleCount = trimmedSampleCount
+        bufferLock.unlock()
+
+        agreementEngine.reset()
     }
 
     func disconnect() async {
@@ -117,7 +158,9 @@ final class FluidAudioStreamingProvider: StreamingTranscriptionProvider {
     }
 
     private func runTranscriptionPass() async {
-        guard !isTranscribing else { return }
+        guard beginExclusiveTranscription() else { return }
+        defer { endExclusiveTranscription() }
+
         guard let asrManager else { return }
 
         bufferLock.lock()
@@ -126,9 +169,6 @@ final class FluidAudioStreamingProvider: StreamingTranscriptionProvider {
 
         guard absoluteSampleCount - lastTranscribedSampleCount >= minNewSamples else { return }
         guard absoluteSampleCount >= Int(sampleRate) else { return }
-
-        isTranscribing = true
-        defer { isTranscribing = false }
 
         // Seek to the start of the first unconfirmed word so it isn't clipped.
         let seekTime = agreementEngine.hypothesisStartTime > 0
@@ -202,8 +242,8 @@ final class FluidAudioStreamingProvider: StreamingTranscriptionProvider {
     }
 
     // Final transcription of audio after the last confirmed word.
-    private func transcribeRemainingAudio() async -> String? {
-        guard let asrManager else { return nil }
+    private func transcribeRemainingAudio(upToAbsoluteSample boundarySample: Int? = nil) async -> RemainingAudioTranscription {
+        guard let asrManager else { return .unavailable }
 
         let seekTime = agreementEngine.hypothesisStartTime > 0
             ? agreementEngine.hypothesisStartTime
@@ -212,14 +252,18 @@ final class FluidAudioStreamingProvider: StreamingTranscriptionProvider {
 
         bufferLock.lock()
         let bufferRelativeSeek = max(0, seekSample - trimmedSampleCount)
-        guard bufferRelativeSeek < audioBuffer.count else {
+        let bufferRelativeEnd = min(
+            audioBuffer.count,
+            max(0, (boundarySample ?? (trimmedSampleCount + audioBuffer.count)) - trimmedSampleCount)
+        )
+        guard bufferRelativeSeek < bufferRelativeEnd else {
             bufferLock.unlock()
-            return nil
+            return .unavailable
         }
-        var samples = Array(audioBuffer[bufferRelativeSeek...])
+        var samples = Array(audioBuffer[bufferRelativeSeek..<bufferRelativeEnd])
         bufferLock.unlock()
 
-        guard samples.count >= Int(sampleRate) else { return nil }
+        guard samples.count >= Int(sampleRate) else { return .unavailable }
 
         let trailingSilenceSamples = 16_000
         let maxSingleChunkSamples = 240_000
@@ -231,11 +275,11 @@ final class FluidAudioStreamingProvider: StreamingTranscriptionProvider {
             var state = TdtDecoderState.make(decoderLayers: decoderLayerCount)
             let result = try await asrManager.transcribe(samples, decoderState: &state)
             let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { return nil }
-            return TextNormalizer.shared.normalizeSentence(text)
+            guard !text.isEmpty else { return .transcribed("") }
+            return .transcribed(TextNormalizer.shared.normalizeSentence(text))
         } catch {
             logger.error("Final transcription failed: \(error.localizedDescription, privacy: .public)")
-            return nil
+            return .unavailable
         }
     }
 
@@ -251,5 +295,29 @@ final class FluidAudioStreamingProvider: StreamingTranscriptionProvider {
             }
         }
         return samples
+    }
+
+    private func beginExclusiveTranscription() -> Bool {
+        transcriptionStateLock.lock()
+        defer { transcriptionStateLock.unlock() }
+        guard !isTranscribing else { return false }
+        isTranscribing = true
+        return true
+    }
+
+    private func endExclusiveTranscription() {
+        transcriptionStateLock.lock()
+        isTranscribing = false
+        transcriptionStateLock.unlock()
+    }
+
+    private func waitForTranscriptionSlot() async -> Bool {
+        for _ in 0..<40 {
+            if beginExclusiveTranscription() {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return false
     }
 }

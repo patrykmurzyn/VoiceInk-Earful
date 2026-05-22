@@ -267,35 +267,129 @@ struct RecorderPowerModeButton: View {
 
 struct LiveTranscriptView: View {
     let text: String
+    /// Optional explicit height override; falls back to a sensible default
+    /// that grows when the transcript contains chat-style speaker labels.
+    var height: CGFloat? = nil
+
+    private var lines: [LiveTranscriptLine] {
+        LiveTranscriptParser.parse(text)
+    }
+
+    private var hasSpeakerLabels: Bool {
+        lines.contains { if case .labeled = $0 { return true } else { return false } }
+    }
+
+    private var resolvedHeight: CGFloat {
+        if let height { return height }
+        return hasSpeakerLabels ? 220 : 80
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
-            ScrollView(.vertical, showsIndicators: false) {
-                Text(text)
-                    .font(.system(size: 12))
-                    .foregroundColor(.white.opacity(0.8))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 6)
-                    .id("bottom")
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                        LiveTranscriptRow(line: line)
+                    }
+                    Color.clear.frame(height: 1).id("bottom")
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(height: 56)
-            .mask(
-                LinearGradient(
-                    stops: [
-                        .init(color: .clear, location: 0.0),
-                        .init(color: .black, location: 0.18),
-                        .init(color: .black, location: 1.0)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
+            .frame(height: resolvedHeight)
             .onChange(of: text) {
-                proxy.scrollTo("bottom", anchor: .bottom)
+                withAnimation(.easeOut(duration: 0.15)) {
+                    proxy.scrollTo("bottom", anchor: .bottom)
+                }
             }
         }
-        .transaction { $0.disablesAnimations = true }
+    }
+}
+
+enum LiveTranscriptLine {
+    case labeled(LiveTranscriptSpeaker, String, isLive: Bool)
+    case plain(String)
+}
+
+enum LiveTranscriptSpeaker {
+    case me
+    case them
+
+    var color: Color {
+        switch self {
+        case .me:   return .accentColor
+        case .them: return Color.white.opacity(0.18)
+        }
+    }
+
+    var foreground: Color {
+        switch self {
+        case .me:   return .white
+        case .them: return .white
+        }
+    }
+}
+
+enum LiveTranscriptParser {
+    static func parse(_ text: String) -> [LiveTranscriptLine] {
+        guard !text.isEmpty else { return [] }
+        return text.split(separator: "\n", omittingEmptySubsequences: false).compactMap { raw in
+            let line = String(raw)
+            // Order matters — "[ME~]:" must be checked before "[ME]:" because
+            // the latter is a prefix of the former otherwise.
+            if let body = stripPrefix(line, prefix: "[ME~]:") {
+                return .labeled(.me, body, isLive: true)
+            }
+            if let body = stripPrefix(line, prefix: "[THEM~]:") {
+                return .labeled(.them, body, isLive: true)
+            }
+            if let body = stripPrefix(line, prefix: "[ME]:") {
+                return .labeled(.me, body, isLive: false)
+            }
+            if let body = stripPrefix(line, prefix: "[THEM]:") {
+                return .labeled(.them, body, isLive: false)
+            }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            return trimmed.isEmpty ? nil : .plain(trimmed)
+        }
+    }
+
+    private static func stripPrefix(_ line: String, prefix: String) -> String? {
+        guard line.hasPrefix(prefix) else { return nil }
+        let body = line.dropFirst(prefix.count).trimmingCharacters(in: .whitespaces)
+        return body
+    }
+}
+
+struct LiveTranscriptRow: View {
+    let line: LiveTranscriptLine
+
+    var body: some View {
+        switch line {
+        case .plain(let text):
+            Text(text)
+                .font(.system(size: 12))
+                .foregroundColor(.white.opacity(0.85))
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .labeled(let speaker, let text, let isLive):
+            HStack(spacing: 0) {
+                if speaker == .me { Spacer(minLength: 40) }
+                Text(text)
+                    .font(.system(size: 12))
+                    .italic(isLive)
+                    .foregroundColor(speaker.foreground)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(speaker.color.opacity(isLive ? 0.55 : 1.0))
+                    )
+                    .fixedSize(horizontal: false, vertical: true)
+                if speaker == .them { Spacer(minLength: 40) }
+            }
+            .frame(maxWidth: .infinity)
+        }
     }
 }
 
@@ -304,12 +398,26 @@ struct LiveTranscriptView: View {
 struct RecorderStatusDisplay: View {
     let currentState: RecordingState
     let audioMeter: AudioMeter
+    let sourceAudioMeters: SourceAudioMeters
+    let audioSourceMode: AudioSourceMode
     let menuBarHeight: CGFloat?
 
-    init(currentState: RecordingState, audioMeter: AudioMeter, menuBarHeight: CGFloat? = nil) {
+    init(
+        currentState: RecordingState,
+        audioMeter: AudioMeter,
+        sourceAudioMeters: SourceAudioMeters = .zero,
+        audioSourceMode: AudioSourceMode = .microphone,
+        menuBarHeight: CGFloat? = nil
+    ) {
         self.currentState = currentState
         self.audioMeter = audioMeter
+        self.sourceAudioMeters = sourceAudioMeters
+        self.audioSourceMode = audioSourceMode
         self.menuBarHeight = menuBarHeight
+    }
+
+    private var statusScale: CGFloat {
+        menuBarHeight != nil ? min(1.0, (menuBarHeight! - 8) / 25) : 1.0
     }
 
     var body: some View {
@@ -319,15 +427,31 @@ struct RecorderStatusDisplay: View {
             } else if currentState == .transcribing {
                 ProcessingStatusDisplay(mode: .transcribing, color: .white).transition(.opacity)
             } else if currentState == .recording {
-                AudioVisualizer(audioMeter: audioMeter, color: .white, isActive: true)
-                    .scaleEffect(y: menuBarHeight != nil ? min(1.0, (menuBarHeight! - 8) / 25) : 1.0, anchor: .center)
-                    .transition(.opacity)
+                recordingVisualizer.transition(.opacity)
             } else {
                 StaticVisualizer(color: .white)
-                    .scaleEffect(y: menuBarHeight != nil ? min(1.0, (menuBarHeight! - 8) / 25) : 1.0, anchor: .center)
+                    .scaleEffect(y: statusScale, anchor: .center)
                     .transition(.opacity)
             }
         }
         .animation(.easeInOut(duration: 0.2), value: currentState)
+    }
+
+    @ViewBuilder
+    private var recordingVisualizer: some View {
+        switch audioSourceMode {
+        case .microphone:
+            AudioVisualizer(audioMeter: sourceAudioMeters.microphone, color: .accentColor, isActive: true)
+                .scaleEffect(y: statusScale, anchor: .center)
+        case .systemAudio:
+            AudioVisualizer(audioMeter: sourceAudioMeters.system, color: .white, isActive: true)
+                .scaleEffect(y: statusScale, anchor: .center)
+        case .mixed:
+            HStack(spacing: 5) {
+                AudioVisualizer(audioMeter: sourceAudioMeters.system, color: .white, isActive: true, barCount: 9)
+                AudioVisualizer(audioMeter: sourceAudioMeters.microphone, color: .accentColor, isActive: true, barCount: 9)
+            }
+            .scaleEffect(y: statusScale, anchor: .center)
+        }
     }
 }

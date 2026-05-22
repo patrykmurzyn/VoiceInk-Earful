@@ -23,7 +23,20 @@ final class MixedAudioRecorder: NSObject, AudioCaptureSource, @unchecked Sendabl
     private(set) var systemFileURL: URL?
 
     var onAudioChunk: ((_ data: Data) -> Void)? {
-        didSet { mic.onAudioChunk = onAudioChunk }
+        didSet { onMicAudioChunk = onAudioChunk }
+    }
+
+    /// Chunks emitted by the microphone sub-recorder (16 kHz mono Int16).
+    /// Setting this overrides the `onAudioChunk` legacy single-stream sink.
+    var onMicAudioChunk: ((_ data: Data) -> Void)? {
+        didSet { mic.onAudioChunk = onMicAudioChunk }
+    }
+
+    /// Chunks emitted by the system-audio sub-recorder (16 kHz mono Int16).
+    /// Only consumers that explicitly need a separated system stream should
+    /// set this — e.g. the parallel-streaming coordinator for mixed mode.
+    var onSystemAudioChunk: ((_ data: Data) -> Void)? {
+        didSet { system.onAudioChunk = onSystemAudioChunk }
     }
 
     var averagePower: Float {
@@ -32,6 +45,22 @@ final class MixedAudioRecorder: NSObject, AudioCaptureSource, @unchecked Sendabl
 
     var peakPower: Float {
         max(mic.peakPower, system.peakPower)
+    }
+
+    var micAveragePower: Float {
+        mic.averagePower
+    }
+
+    var micPeakPower: Float {
+        mic.peakPower
+    }
+
+    var systemAveragePower: Float {
+        system.averagePower
+    }
+
+    var systemPeakPower: Float {
+        system.peakPower
     }
 
     init(micDeviceID: AudioDeviceID) {

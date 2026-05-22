@@ -11,6 +11,12 @@ class VoiceInkEngine: NSObject, ObservableObject {
     @Published var shouldCancelRecording = false
     var partialTranscript: String = ""
     var currentSession: TranscriptionSession?
+    /// Coordinator for parallel mic + system streaming in mixed mode.
+    /// Non-nil only while a live mixed recording is in progress.
+    private var mixedLiveStreamer: MixedLiveStreamer?
+    /// Final labeled transcript captured from `mixedLiveStreamer` on stop,
+    /// consumed by `runPipeline` as `prebuiltText` for the saved record.
+    private var pendingMixedLiveTranscript: String?
     private var activeRecordingStartID: UUID?
 
     let recorder = Recorder()
@@ -97,6 +103,7 @@ class VoiceInkEngine: NSObject, ObservableObject {
             partialTranscript = ""
             recordingState = .transcribing
             await recorder.stopRecording()
+            pendingMixedLiveTranscript = await finalizeMixedLiveStreamingIfNeeded()
 
             if let recordedFile {
                 if !shouldCancelRecording {
@@ -175,28 +182,40 @@ class VoiceInkEngine: NSObject, ObservableObject {
 
                             if self.recordingState == .recording,
                                let model = self.transcriptionModelManager.currentTranscriptionModel {
-                                let session = self.serviceRegistry.createSession(
-                                    for: model,
-                                    onPartialTranscript: { [weak self] partial in
-                                        Task { @MainActor in
-                                            self?.partialTranscript = partial
-                                        }
-                                    }
-                                )
-                                self.currentSession = session
-                                let realCallback = try await session.prepare(model: model)
-
-                                if let realCallback {
-                                    self.recorder.onAudioChunk = realCallback
-                                    let buffered = pendingChunks.withLock { chunks -> [Data] in
-                                        let result = chunks
-                                        chunks.removeAll()
-                                        return result
-                                    }
-                                    for chunk in buffered { realCallback(chunk) }
+                                if AudioSourceMode.current == .mixed,
+                                   model.supportsStreaming,
+                                   model.provider == .fluidAudio,
+                                   self.isStreamingEnabled(for: model),
+                                   let mixedRec = self.recorder.mixedAudioRecorder {
+                                    try await self.startMixedLiveStreaming(
+                                        model: model,
+                                        mixedRecorder: mixedRec,
+                                        bufferedChunks: pendingChunks
+                                    )
                                 } else {
-                                    self.recorder.onAudioChunk = nil
-                                    pendingChunks.withLock { $0.removeAll() }
+                                    let session = self.serviceRegistry.createSession(
+                                        for: model,
+                                        onPartialTranscript: { [weak self] partial in
+                                            Task { @MainActor in
+                                                self?.partialTranscript = partial
+                                            }
+                                        }
+                                    )
+                                    self.currentSession = session
+                                    let realCallback = try await session.prepare(model: model)
+
+                                    if let realCallback {
+                                        self.recorder.onAudioChunk = realCallback
+                                        let buffered = pendingChunks.withLock { chunks -> [Data] in
+                                            let result = chunks
+                                            chunks.removeAll()
+                                            return result
+                                        }
+                                        for chunk in buffered { realCallback(chunk) }
+                                    } else {
+                                        self.recorder.onAudioChunk = nil
+                                        pendingChunks.withLock { $0.removeAll() }
+                                    }
                                 }
                             }
 
@@ -226,11 +245,12 @@ class VoiceInkEngine: NSObject, ObservableObject {
                             }
 
                         } catch {
-                            self.logger.error("❌ Failed to start recording: \(error.localizedDescription, privacy: .public)")
+                            let message = Self.recordingStartErrorMessage(error)
+                            self.logger.error("❌ Failed to start recording: \(message, privacy: .public)")
                             self.recordingState = .idle
                             self.recordedFile = nil
                             self.activeRecordingStartID = nil
-                            await NotificationManager.shared.showNotification(title: "Recording failed to start", type: .error)
+                            await NotificationManager.shared.showNotification(title: message, type: .error)
                             self.logger.notice("toggleRecord: calling dismissMiniRecorder from error handler")
                             await self.recorderUIManager?.dismissMiniRecorder()
                         }
@@ -244,6 +264,70 @@ class VoiceInkEngine: NSObject, ObservableObject {
 
     private func requestRecordPermission(response: @escaping (Bool) -> Void) {
         response(true)
+    }
+
+    private static func recordingStartErrorMessage(_ error: Error) -> String {
+        if case Recorder.RecorderError.couldNotStartRecording(let message) = error {
+            return message
+        }
+        return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+    }
+
+    // MARK: - Mixed-Mode Live Streaming
+
+    /// Matches `TranscriptionServiceRegistry.supportsStreaming(model:)` for the
+    /// model-level toggle ("streaming-enabled-<name>") which defaults to true.
+    private func isStreamingEnabled(for model: any TranscriptionModel) -> Bool {
+        UserDefaults.standard.object(forKey: "streaming-enabled-\(model.name)") as? Bool ?? true
+    }
+
+    /// Spins up two parallel FluidAudio streaming providers and wires the
+    /// recorder's mic and system chunks to them. Merged `[ME]:`/`[THEM]:`
+    /// partials feed `partialTranscript` while recording is active.
+    private func startMixedLiveStreaming(
+        model: any TranscriptionModel,
+        mixedRecorder: MixedAudioRecorder,
+        bufferedChunks: OSAllocatedUnfairLock<[Data]>
+    ) async throws {
+        let streamer = MixedLiveStreamer(
+            fluidAudioService: serviceRegistry.fluidAudioTranscriptionService,
+            onPartialUpdate: { [weak self] partial in
+                Task { @MainActor in self?.partialTranscript = partial }
+            }
+        )
+        try await streamer.connect(model: model, language: nil)
+        mixedLiveStreamer = streamer
+
+        // Buffered chunks captured before this point arrived on the mic source
+        // (legacy `onAudioChunk` setter); replay them into the mic provider.
+        let buffered = bufferedChunks.withLock { chunks -> [Data] in
+            let result = chunks
+            chunks.removeAll()
+            return result
+        }
+        for chunk in buffered {
+            try? await streamer.sendMicChunk(chunk)
+        }
+
+        recorder.onAudioChunk = nil
+        mixedRecorder.onMicAudioChunk = { data in
+            Task { try? await streamer.sendMicChunk(data) }
+        }
+        mixedRecorder.onSystemAudioChunk = { data in
+            Task { try? await streamer.sendSystemChunk(data) }
+        }
+    }
+
+    /// Commits, drains, and tears down the mixed live streamer if it was
+    /// active, returning its final labeled transcript for `pipeline.run` to
+    /// consume as `prebuiltText`.
+    private func finalizeMixedLiveStreamingIfNeeded() async -> String? {
+        guard let streamer = mixedLiveStreamer else { return nil }
+        mixedLiveStreamer = nil
+        await streamer.commit()
+        let final = streamer.finalTranscript()
+        await streamer.disconnect()
+        return final.isEmpty ? nil : final
     }
 
     // MARK: - Pipeline Dispatch
@@ -261,30 +345,30 @@ class VoiceInkEngine: NSObject, ObservableObject {
         currentSession = nil
 
         var prebuiltText: String? = nil
-        if let companionURL = recorder.companionAudioURL {
-            if model.provider == .whisper {
-                do {
-                    let mixedTranscriber = MixedTranscriber(modelProvider: whisperModelManager)
-                    prebuiltText = try await mixedTranscriber.transcribe(
-                        micURL: audioURL,
-                        systemURL: companionURL,
-                        model: model
-                    )
-                } catch {
-                    logger.error("Mixed-mode transcription failed: \(error.localizedDescription, privacy: .public)")
-                    transcription.text = "Transcription Failed: \(error.localizedDescription)"
-                    transcription.transcriptionStatus = TranscriptionStatus.failed.rawValue
-                    try? modelContext.save()
-                    await recorderUIManager?.dismissMiniRecorder()
-                    recordingState = .idle
-                    return
-                }
-            } else {
-                logger.notice("Mixed mode requires a Whisper model; falling back to standard transcription on mic stream only.")
+        if let mixedLive = pendingMixedLiveTranscript {
+            pendingMixedLiveTranscript = nil
+            prebuiltText = mixedLive
+        } else if let companionURL = recorder.companionAudioURL,
+                  model.provider == .whisper {
+            do {
+                let mixedTranscriber = MixedTranscriber(modelProvider: whisperModelManager)
+                prebuiltText = try await mixedTranscriber.transcribe(
+                    micURL: audioURL,
+                    systemURL: companionURL,
+                    model: model
+                )
+            } catch {
+                logger.error("Mixed-mode transcription failed: \(error.localizedDescription, privacy: .public)")
+                transcription.text = "Transcription Failed: \(error.localizedDescription)"
+                transcription.transcriptionStatus = TranscriptionStatus.failed.rawValue
+                try? modelContext.save()
+                await recorderUIManager?.dismissMiniRecorder()
+                recordingState = .idle
+                return
             }
-            // Companion file is consumed for transcription; remove afterwards.
-            try? FileManager.default.removeItem(at: companionURL)
         }
+        // Companion WAV (system audio for mixed mode) is retained on disk so
+        // it can be re-processed later from the history view.
 
         await pipeline.run(
             transcription: transcription,

@@ -13,6 +13,8 @@ class Recorder: NSObject, ObservableObject {
     private let mediaController = MediaController.shared
     private let playbackController = PlaybackController.shared
     @Published var audioMeter = AudioMeter(averagePower: 0, peakPower: 0)
+    @Published var sourceAudioMeters = SourceAudioMeters.zero
+    @Published var activeAudioSourceMode: AudioSourceMode = AudioSourceMode.current
     private var audioMeterUpdateTimer: DispatchSourceTimer?
     private let audioMeterQueue = DispatchQueue(label: "com.prakashjoshipax.voiceink.audiometer", qos: .userInteractive)
     /// Dedicated serial queue for hardware setup.
@@ -22,6 +24,10 @@ class Recorder: NSObject, ObservableObject {
     private let smoothedValuesLock = NSLock()
     private var smoothedAverage: Float = 0
     private var smoothedPeak: Float = 0
+    private var smoothedMicAverage: Float = 0
+    private var smoothedMicPeak: Float = 0
+    private var smoothedSystemAverage: Float = 0
+    private var smoothedSystemPeak: Float = 0
 
     /// Audio chunk callback for streaming. Can be updated while recording;
     /// changes are forwarded to the live capture source.
@@ -35,8 +41,18 @@ class Recorder: NSObject, ObservableObject {
     /// `nil` for single-source modes.
     private(set) var companionAudioURL: URL?
 
+    /// Underlying mixed-source recorder while one is active, allowing live
+    /// streaming consumers to subscribe to the mic and system chunk streams
+    /// separately. `nil` outside mixed mode.
+    var mixedAudioRecorder: MixedAudioRecorder? {
+        if #available(macOS 13.0, *) {
+            return recorder as? MixedAudioRecorder
+        }
+        return nil
+    }
+
     enum RecorderError: Error {
-        case couldNotStartRecording
+        case couldNotStartRecording(String)
     }
     
     override init() {
@@ -134,6 +150,7 @@ class Recorder: NSObject, ObservableObject {
         audioMeterUpdateTimer?.cancel()
 
         let sourceMode = AudioSourceMode.current
+        activeAudioSourceMode = sourceMode
         let captureSource: any AudioCaptureSource
         switch sourceMode {
         case .systemAudio:
@@ -186,9 +203,10 @@ class Recorder: NSObject, ObservableObject {
                 }
             }
         } catch {
-            logger.error("Failed to start recording: \(error.localizedDescription, privacy: .public)")
+            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            logger.error("Failed to start recording: \(message, privacy: .public)")
             await stopRecording()
-            throw RecorderError.couldNotStartRecording
+            throw RecorderError.couldNotStartRecording(message)
         }
     }
 
@@ -214,9 +232,14 @@ class Recorder: NSObject, ObservableObject {
         smoothedValuesLock.lock()
         smoothedAverage = 0
         smoothedPeak = 0
+        smoothedMicAverage = 0
+        smoothedMicPeak = 0
+        smoothedSystemAverage = 0
+        smoothedSystemPeak = 0
         smoothedValuesLock.unlock()
 
         audioMeter = AudioMeter(averagePower: 0, peakPower: 0)
+        sourceAudioMeters = .zero
 
         if AudioSourceMode.current == .microphone {
             audioRestorationTask = Task {
@@ -255,44 +278,73 @@ class Recorder: NSObject, ObservableObject {
     private func updateAudioMeter() {
         guard let recorder = recorder else { return }
 
-        // Sample audio levels (thread-safe read)
-        let averagePower = recorder.averagePower
-        let peakPower = recorder.peakPower
+        let sourceMode = AudioSourceMode.current
+        let combinedRaw = RawAudioMeter(averagePower: recorder.averagePower, peakPower: recorder.peakPower)
+        let micRaw: RawAudioMeter
+        let systemRaw: RawAudioMeter
 
-        // Normalize values
-        let minVisibleDb: Float = -60.0
-        let maxVisibleDb: Float = 0.0
-
-        let normalizedAverage: Float
-        if averagePower < minVisibleDb {
-            normalizedAverage = 0.0
-        } else if averagePower >= maxVisibleDb {
-            normalizedAverage = 1.0
+        if #available(macOS 13.0, *), let mixed = recorder as? MixedAudioRecorder {
+            micRaw = RawAudioMeter(averagePower: mixed.micAveragePower, peakPower: mixed.micPeakPower)
+            systemRaw = RawAudioMeter(averagePower: mixed.systemAveragePower, peakPower: mixed.systemPeakPower)
         } else {
-            normalizedAverage = (averagePower - minVisibleDb) / (maxVisibleDb - minVisibleDb)
+            switch sourceMode {
+            case .microphone:
+                micRaw = combinedRaw
+                systemRaw = .silent
+            case .systemAudio:
+                micRaw = .silent
+                systemRaw = combinedRaw
+            case .mixed:
+                micRaw = combinedRaw
+                systemRaw = .silent
+            }
         }
 
-        let normalizedPeak: Float
-        if peakPower < minVisibleDb {
-            normalizedPeak = 0.0
-        } else if peakPower >= maxVisibleDb {
-            normalizedPeak = 1.0
-        } else {
-            normalizedPeak = (peakPower - minVisibleDb) / (maxVisibleDb - minVisibleDb)
-        }
+        let normalizedCombined = Self.normalizeAudioMeter(combinedRaw)
+        let normalizedMic = Self.normalizeAudioMeter(micRaw)
+        let normalizedSystem = Self.normalizeAudioMeter(systemRaw)
 
-        // Apply EMA smoothing with thread-safe access
         smoothedValuesLock.lock()
-        smoothedAverage = smoothedAverage * 0.6 + normalizedAverage * 0.4
-        smoothedPeak = smoothedPeak * 0.6 + normalizedPeak * 0.4
+        smoothedAverage = Self.smoothed(previous: smoothedAverage, next: normalizedCombined.averagePower)
+        smoothedPeak = Self.smoothed(previous: smoothedPeak, next: normalizedCombined.peakPower)
+        smoothedMicAverage = Self.smoothed(previous: smoothedMicAverage, next: normalizedMic.averagePower)
+        smoothedMicPeak = Self.smoothed(previous: smoothedMicPeak, next: normalizedMic.peakPower)
+        smoothedSystemAverage = Self.smoothed(previous: smoothedSystemAverage, next: normalizedSystem.averagePower)
+        smoothedSystemPeak = Self.smoothed(previous: smoothedSystemPeak, next: normalizedSystem.peakPower)
+
         let newAudioMeter = AudioMeter(averagePower: Double(smoothedAverage), peakPower: Double(smoothedPeak))
+        let newSourceAudioMeters = SourceAudioMeters(
+            combined: newAudioMeter,
+            microphone: AudioMeter(averagePower: Double(smoothedMicAverage), peakPower: Double(smoothedMicPeak)),
+            system: AudioMeter(averagePower: Double(smoothedSystemAverage), peakPower: Double(smoothedSystemPeak))
+        )
         smoothedValuesLock.unlock()
 
-        // Dispatch to main queue for UI updates (more efficient than Task)
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.audioMeter = newAudioMeter
+            self.sourceAudioMeters = newSourceAudioMeters
         }
+    }
+
+    private static func normalizeAudioMeter(_ meter: RawAudioMeter) -> RawAudioMeter {
+        RawAudioMeter(
+            averagePower: normalizeDb(meter.averagePower),
+            peakPower: normalizeDb(meter.peakPower)
+        )
+    }
+
+    private static func normalizeDb(_ value: Float) -> Float {
+        let minVisibleDb: Float = -60.0
+        let maxVisibleDb: Float = 0.0
+
+        if value < minVisibleDb { return 0.0 }
+        if value >= maxVisibleDb { return 1.0 }
+        return (value - minVisibleDb) / (maxVisibleDb - minVisibleDb)
+    }
+
+    private static func smoothed(previous: Float, next: Float) -> Float {
+        previous * 0.6 + next * 0.4
     }
     
     // MARK: - Cleanup
@@ -309,4 +361,23 @@ class Recorder: NSObject, ObservableObject {
 struct AudioMeter: Equatable {
     let averagePower: Double
     let peakPower: Double
+}
+
+struct SourceAudioMeters: Equatable {
+    let combined: AudioMeter
+    let microphone: AudioMeter
+    let system: AudioMeter
+
+    static let zero = SourceAudioMeters(
+        combined: AudioMeter(averagePower: 0, peakPower: 0),
+        microphone: AudioMeter(averagePower: 0, peakPower: 0),
+        system: AudioMeter(averagePower: 0, peakPower: 0)
+    )
+}
+
+private struct RawAudioMeter {
+    let averagePower: Float
+    let peakPower: Float
+
+    static let silent = RawAudioMeter(averagePower: -160, peakPower: -160)
 }

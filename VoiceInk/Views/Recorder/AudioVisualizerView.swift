@@ -5,7 +5,7 @@ struct AudioVisualizer: View {
     let color: Color
     let isActive: Bool
 
-    private let barCount = 15
+    private let barCount: Int
     private let barWidth: CGFloat = 3
     private let barSpacing: CGFloat = 2
     private let minHeight: CGFloat = 4
@@ -13,10 +13,11 @@ struct AudioVisualizer: View {
 
     private let phases: [Double]
 
-    init(audioMeter: AudioMeter, color: Color, isActive: Bool) {
+    init(audioMeter: AudioMeter, color: Color, isActive: Bool, barCount: Int = 15) {
         self.audioMeter = audioMeter
         self.color = color
         self.isActive = isActive
+        self.barCount = barCount
         self.phases = (0..<barCount).map { Double($0) * 0.4 }
     }
 
@@ -47,11 +48,16 @@ struct AudioVisualizer: View {
 
 // Flat bars shown when the recorder is idle (no audio input)
 struct StaticVisualizer: View {
-    private let barCount = 15
+    private let barCount: Int
     private let barWidth: CGFloat = 3
     private let barHeight: CGFloat = 4
     private let barSpacing: CGFloat = 2
     let color: Color
+
+    init(color: Color, barCount: Int = 15) {
+        self.color = color
+        self.barCount = barCount
+    }
 
     var body: some View {
         HStack(spacing: barSpacing) {

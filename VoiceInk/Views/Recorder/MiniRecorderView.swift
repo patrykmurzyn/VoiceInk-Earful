@@ -13,7 +13,7 @@ struct MiniRecorderView<S: RecorderStateProvider & ObservableObject>: View {
 
     private let controlBarHeight: CGFloat = 40
     private let compactWidth: CGFloat = 184
-    private let expandedWidth: CGFloat = 300
+    private let expandedWidth: CGFloat = 440
     private let compactCornerRadius: CGFloat = 20
     private let expandedCornerRadius: CGFloat = 14
 
@@ -37,7 +37,9 @@ struct MiniRecorderView<S: RecorderStateProvider & ObservableObject>: View {
 
             RecorderStatusDisplay(
                 currentState: stateProvider.recordingState,
-                audioMeter: recorder.audioMeter
+                audioMeter: recorder.audioMeter,
+                sourceAudioMeters: recorder.sourceAudioMeters,
+                audioSourceMode: recorder.activeAudioSourceMode
             )
 
             Spacer(minLength: 0)

@@ -103,3 +103,6 @@ Temporary Items
 # Coverage / profile artifacts
 *.profraw
 *.profdata
+
+# Local AI assistant notes
+.ai/
