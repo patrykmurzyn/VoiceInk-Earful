@@ -32,7 +32,9 @@ struct CustomModelCardView: View {
             Text(model.displayName)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(.labelColor))
-            
+
+            StreamingCapabilityBadge(supportsStreaming: model.supportsStreaming)
+
             Spacer()
         }
     }

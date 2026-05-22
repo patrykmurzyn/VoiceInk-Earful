@@ -32,12 +32,13 @@ class MiniRecorderPanel: NSPanel {
     
     static func calculateWindowMetrics() -> NSRect {
         guard let screen = NSScreen.main else {
-            return NSRect(x: 0, y: 0, width: 300, height: 120)
+            return NSRect(x: 0, y: 0, width: 460, height: 320)
         }
 
-        // Fixed window size — large enough to accommodate live transcript content
-        let width: CGFloat = 300
-        let height: CGFloat = 120
+        // Fixed window size, large enough to accommodate scrollable live
+        // transcript with chat-style speaker bubbles when active.
+        let width: CGFloat = 460
+        let height: CGFloat = 320
         let padding: CGFloat = 24
 
         let visibleFrame = screen.visibleFrame
@@ -62,4 +63,4 @@ class MiniRecorderPanel: NSPanel {
     func hide(completion: @escaping () -> Void) {
         completion()
     }
-} 
+}

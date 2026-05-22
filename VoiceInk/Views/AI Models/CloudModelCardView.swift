@@ -73,6 +73,8 @@ struct CloudModelCardView: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color(.labelColor))
 
+            StreamingCapabilityBadge(supportsStreaming: model.supportsStreaming)
+
             if model.supportsStreaming && isConfigured {
                 streamingModeBadge
             }
