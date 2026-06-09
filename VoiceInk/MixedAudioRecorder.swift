@@ -18,6 +18,11 @@ final class MixedAudioRecorder: NSObject, AudioCaptureSource, @unchecked Sendabl
     private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "MixedAudioRecorder")
     private let mic: CoreAudioRecorder
     private let system: SystemAudioRecorder
+    private let micNoiseGate = PCM16NoiseGate(
+        thresholdDb: -42,
+        holdDurationMs: 250,
+        sampleRate: 16_000
+    )
 
     private(set) var micFileURL: URL?
     private(set) var systemFileURL: URL?
@@ -68,11 +73,15 @@ final class MixedAudioRecorder: NSObject, AudioCaptureSource, @unchecked Sendabl
         self.mic.preferredDeviceID = micDeviceID
         self.system = SystemAudioRecorder()
         super.init()
+        mic.pcm16OutputProcessor = { [micNoiseGate] samples, count in
+            micNoiseGate.process(samples: samples, count: count)
+        }
     }
 
     func start(toOutputFile url: URL) throws {
         let companion = url.deletingPathExtension().appendingPathExtension("system.wav")
 
+        micNoiseGate.reset()
         try mic.start(toOutputFile: url)
         do {
             try system.start(toOutputFile: companion)
@@ -88,5 +97,48 @@ final class MixedAudioRecorder: NSObject, AudioCaptureSource, @unchecked Sendabl
     func stop() {
         mic.stop()
         system.stop()
+    }
+}
+
+private final class PCM16NoiseGate: @unchecked Sendable {
+    private let thresholdRMS: Float
+    private let holdSampleCount: Int
+    private var remainingHoldSamples: Int = 0
+
+    init(thresholdDb: Float, holdDurationMs: Int, sampleRate: Int) {
+        self.thresholdRMS = pow(10, thresholdDb / 20)
+        self.holdSampleCount = max(0, sampleRate * holdDurationMs / 1_000)
+    }
+
+    func reset() {
+        remainingHoldSamples = 0
+    }
+
+    func process(samples: UnsafeMutablePointer<Int16>, count: Int) {
+        guard count > 0 else { return }
+
+        let rms = Self.rms(samples: samples, count: count)
+        if rms >= thresholdRMS {
+            remainingHoldSamples = holdSampleCount
+            return
+        }
+
+        if remainingHoldSamples > 0 {
+            remainingHoldSamples = max(0, remainingHoldSamples - count)
+            return
+        }
+
+        for i in 0..<count {
+            samples[i] = 0
+        }
+    }
+
+    private static func rms(samples: UnsafeMutablePointer<Int16>, count: Int) -> Float {
+        var sumSquares: Double = 0
+        for i in 0..<count {
+            let sample = Double(samples[i]) / 32_768.0
+            sumSquares += sample * sample
+        }
+        return Float((sumSquares / Double(count)).squareRoot())
     }
 }

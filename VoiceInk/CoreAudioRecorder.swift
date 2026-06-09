@@ -53,6 +53,10 @@ final class CoreAudioRecorder: @unchecked Sendable {
     /// Called on the audio thread with raw PCM data (16-bit, 16kHz, mono) for streaming.
     var onAudioChunk: ((_ data: Data) -> Void)?
 
+    /// Optional in-place processor for the final 16 kHz mono Int16 stream.
+    /// This runs before both file writes and streaming callbacks.
+    var pcm16OutputProcessor: ((_ samples: UnsafeMutablePointer<Int16>, _ count: Int) -> Void)?
+
     // MARK: - Initialization
 
     init() {}
@@ -691,6 +695,9 @@ final class CoreAudioRecorder: @unchecked Sendable {
             }
         }
 
+        let outputSampleCount = Int(outputFrameCount)
+        pcm16OutputProcessor?(outputBuffer, outputSampleCount)
+
         // Write to file
         var outputBufferList = AudioBufferList(
             mNumberBuffers: 1,
@@ -708,7 +715,7 @@ final class CoreAudioRecorder: @unchecked Sendable {
 
         // Send the same PCM data to the streaming callback if set
         if let onAudioChunk = onAudioChunk {
-            let byteCount = Int(outputFrameCount) * MemoryLayout<Int16>.size
+            let byteCount = outputSampleCount * MemoryLayout<Int16>.size
             let data = Data(bytes: outputBuffer, count: byteCount)
             onAudioChunk(data)
         }
