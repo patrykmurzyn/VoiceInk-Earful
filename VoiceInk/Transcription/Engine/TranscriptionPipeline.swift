@@ -174,7 +174,6 @@ class TranscriptionPipeline {
 
                 if let enhancementService,
                    let resolvedEnhancementConfiguration,
-                   prebuiltText == nil,
                    resolvedEnhancementConfiguration.isEnabled,
                    enhancementService.isConfigured(for: resolvedEnhancementConfiguration),
                    !shouldSkipEnhancement {
