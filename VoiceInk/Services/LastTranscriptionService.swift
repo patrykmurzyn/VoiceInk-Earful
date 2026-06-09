@@ -111,7 +111,9 @@ class LastTranscriptionService: ObservableObject {
                 return
             }
 
-            guard let currentModel = transcriptionModelManager.currentTranscriptionModel else {
+            guard let transcriptionConfiguration = ModeRuntimeResolver.transcriptionConfiguration(
+                transcriptionModelManager: transcriptionModelManager
+            ) else {
                 NotificationManager.shared.showNotification(
                     title: "No transcription model selected",
                     type: .error
@@ -126,7 +128,10 @@ class LastTranscriptionService: ObservableObject {
                 whisperModelProvider: transcriptionModelManager.whisperModelProvider
             )
             do {
-                let newTranscription = try await transcriptionService.retranscribeAudio(from: audioURL, using: currentModel)
+                let newTranscription = try await transcriptionService.retranscribeAudio(
+                    from: audioURL,
+                    using: transcriptionConfiguration.model
+                )
 
                 let textToCopy = newTranscription.enhancedText?.isEmpty == false ? newTranscription.enhancedText! : newTranscription.text
                 ClipboardManager.copyToClipboard(textToCopy)

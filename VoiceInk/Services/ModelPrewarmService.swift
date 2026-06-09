@@ -14,7 +14,7 @@ final class ModelPrewarmService: ObservableObject {
         modelsDirectory: whisperModelManager.modelsDirectory,
         modelContext: modelContext
     )
-    private let prewarmAudioURL = Bundle.main.url(forResource: "esc", withExtension: "wav")
+    private let prewarmAudioURL = Bundle.main.url(forResource: "sound7", withExtension: "wav")
     private let prewarmEnabledKey = "PrewarmModelOnWake"
 
     init(transcriptionModelManager: TranscriptionModelManager, whisperModelManager: WhisperModelManager, modelContext: ModelContext) {
@@ -67,20 +67,27 @@ final class ModelPrewarmService: ObservableObject {
         guard shouldPrewarm() else { return }
 
         guard let audioURL = prewarmAudioURL else {
-            logger.error("❌ Prewarm audio file (esc.wav) not found")
+            logger.error("❌ Prewarm audio file (sound7.wav) not found")
             return
         }
 
-        guard let currentModel = transcriptionModelManager.currentTranscriptionModel else {
+        guard let transcriptionConfiguration = ModeRuntimeResolver.transcriptionConfiguration(
+            transcriptionModelManager: transcriptionModelManager
+        ) else {
             logger.notice("No model selected, skipping prewarm")
             return
         }
+        let currentModel = transcriptionConfiguration.model
 
         logger.notice("Prewarming \(currentModel.displayName, privacy: .public)")
         let startTime = Date()
 
         do {
-            let _ = try await serviceRegistry.transcribe(audioURL: audioURL, model: currentModel)
+            let _ = try await serviceRegistry.transcribe(
+                audioURL: audioURL,
+                model: currentModel,
+                context: transcriptionConfiguration.requestContext
+            )
             let duration = Date().timeIntervalSince(startTime)
 
             logger.notice("Prewarm completed in \(String(format: "%.2f", duration), privacy: .public)s")
@@ -101,7 +108,9 @@ final class ModelPrewarmService: ObservableObject {
         }
 
         // Only prewarm local models (Parakeet and Whisper need ANE compilation)
-        guard let model = transcriptionModelManager.currentTranscriptionModel else {
+        guard let model = ModeRuntimeResolver.transcriptionConfiguration(
+            transcriptionModelManager: transcriptionModelManager
+        )?.model else {
             return false
         }
 

@@ -19,6 +19,7 @@ final class FluidAudioStreamingProvider: StreamingTranscriptionProvider {
 
     private var asrManager: AsrManager?
     private var decoderLayerCount: Int = 0
+    private var languageHint: Language?
     private let agreementEngine: WordAgreementEngine
     private let config: AgreementConfig
 
@@ -26,7 +27,8 @@ final class FluidAudioStreamingProvider: StreamingTranscriptionProvider {
     private var isTranscribing = false
     private let transcriptionStateLock = NSLock()
     private var lastTranscribedSampleCount = 0
-    private let minNewSamples = 8000 // ~0.5s
+    private let minimumAudioSamples = ASRConstants.minimumRequiredSamples(forSampleRate: ASRConstants.sampleRate)
+    private let minNewSamples = ASRConstants.minimumRequiredSamples(forSampleRate: ASRConstants.sampleRate)
 
     private enum RemainingAudioTranscription {
         case unavailable
@@ -56,6 +58,7 @@ final class FluidAudioStreamingProvider: StreamingTranscriptionProvider {
         try await manager.loadModels(models)
         self.asrManager = manager
         self.decoderLayerCount = await manager.decoderLayerCount
+        self.languageHint = FluidAudioTranscriptionService.languageHint(from: language, model: model)
 
         agreementEngine.reset()
         audioBuffer = []
@@ -128,6 +131,7 @@ final class FluidAudioStreamingProvider: StreamingTranscriptionProvider {
         await asrManager?.cleanup()
         asrManager = nil
         decoderLayerCount = 0
+        languageHint = nil
 
         bufferLock.lock()
         audioBuffer = []
@@ -168,7 +172,7 @@ final class FluidAudioStreamingProvider: StreamingTranscriptionProvider {
         bufferLock.unlock()
 
         guard absoluteSampleCount - lastTranscribedSampleCount >= minNewSamples else { return }
-        guard absoluteSampleCount >= Int(sampleRate) else { return }
+        guard absoluteSampleCount >= minimumAudioSamples else { return }
 
         // Seek to the start of the first unconfirmed word so it isn't clipped.
         let seekTime = agreementEngine.hypothesisStartTime > 0
@@ -193,11 +197,15 @@ final class FluidAudioStreamingProvider: StreamingTranscriptionProvider {
             audioSlice += [Float](repeating: 0, count: trailingSilenceSamples)
         }
 
-        guard audioSlice.count >= Int(sampleRate) else { return }
+        guard audioSlice.count >= minimumAudioSamples else { return }
 
         do {
             var state = TdtDecoderState.make(decoderLayers: decoderLayerCount)
-            let result = try await asrManager.transcribe(audioSlice, decoderState: &state)
+            let result = try await asrManager.transcribe(
+                audioSlice,
+                decoderState: &state,
+                language: languageHint
+            )
             lastTranscribedSampleCount = absoluteSampleCount
 
             guard let tokenTimings = result.tokenTimings, !tokenTimings.isEmpty else {
@@ -263,7 +271,7 @@ final class FluidAudioStreamingProvider: StreamingTranscriptionProvider {
         var samples = Array(audioBuffer[bufferRelativeSeek..<bufferRelativeEnd])
         bufferLock.unlock()
 
-        guard samples.count >= Int(sampleRate) else { return .unavailable }
+        guard samples.count >= minimumAudioSamples else { return .unavailable }
 
         let trailingSilenceSamples = 16_000
         let maxSingleChunkSamples = 240_000
@@ -273,7 +281,11 @@ final class FluidAudioStreamingProvider: StreamingTranscriptionProvider {
 
         do {
             var state = TdtDecoderState.make(decoderLayers: decoderLayerCount)
-            let result = try await asrManager.transcribe(samples, decoderState: &state)
+            let result = try await asrManager.transcribe(
+                samples,
+                decoderState: &state,
+                language: languageHint
+            )
             let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return .transcribed("") }
             return .transcribed(TextNormalizer.shared.normalizeSentence(text))

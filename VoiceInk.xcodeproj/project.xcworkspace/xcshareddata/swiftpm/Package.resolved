@@ -6,8 +6,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/tisfeng/AXSwift.git",
       "state" : {
-        "revision" : "2efa201fa18184de98674165592fd1ecb0c00a6d",
-        "version" : "0.3.6"
+        "revision" : "d737b605c99f6e0f6a21448d0836110bd15b7710",
+        "version" : "0.3.7"
       }
     },
     {
@@ -16,7 +16,7 @@
       "location" : "https://github.com/FluidInference/FluidAudio.git",
       "state" : {
         "branch" : "main",
-        "revision" : "a53aff438bed437bc23490bf0f8d1b57fa3845c7"
+        "revision" : "50aa07193e84b9cf192d8f36041c24a9a4867cd6"
       }
     },
     {
@@ -52,7 +52,7 @@
       "location" : "https://github.com/Beingpax/LLMkit.git",
       "state" : {
         "branch" : "main",
-        "revision" : "2a84ea31fa3fc73a84e015fb3df33e6eba8653d8"
+        "revision" : "adc2239e2a3c586fd442a8ec1d96dec8e9ae8917"
       }
     },
     {
@@ -78,8 +78,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/sparkle-project/Sparkle",
       "state" : {
-        "revision" : "066e75a8b3e99962685d6a90cdd5293ebffd9261",
-        "version" : "2.9.1"
+        "revision" : "6276ba2b404829d139c45ff98427cf90e2efc59b",
+        "version" : "2.9.2"
       }
     },
     {

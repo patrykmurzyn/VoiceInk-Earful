@@ -4,7 +4,7 @@ First off, thank you for considering contributing to VoiceInk! It's people like 
 
 ## ⚠️ Pull Requests Not Accepted
 
-**As of now, this project is not accepting pull requests.** While VoiceInk is open source and you're welcome to fork and modify it for your own use.
+**As of now, this project is not accepting pull requests.** VoiceInk is open source, and you're welcome to fork and modify it for your own use.
 
 **You can still contribute by:**
 - 🐛 **Reporting bugs** - Open an issue with detailed information
@@ -75,4 +75,4 @@ If you have any questions or need clarification, feel free to:
 2. Start a discussion
 3. Reach out to the maintainers
 
-Thank you for contributing to VoiceInk! 🎉 
+Thank you for contributing to VoiceInk! 🎉

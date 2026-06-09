@@ -44,29 +44,38 @@ class OllamaService: ObservableObject {
 
     @MainActor
     func refreshModels() async {
+        _ = await refreshConnectionAndModels()
+    }
+
+    @MainActor
+    func refreshConnectionAndModels() async -> Result<[OllamaModel], Error> {
         isLoadingModels = true
         defer { isLoadingModels = false }
 
         guard let url = baseURLValue else {
-            print("Invalid Ollama base URL")
+            isConnected = false
             availableModels = []
-            return
+            return .failure(LocalAIError.invalidURL)
         }
 
         do {
             let models = try await OllamaClient.fetchModels(baseURL: url)
+            isConnected = true
             availableModels = models
 
             if !models.contains(where: { $0.name == selectedModel }) && !models.isEmpty {
                 selectedModel = models[0].name
             }
+
+            return .success(models)
         } catch {
-            print("Error fetching models: \(error)")
+            isConnected = false
             availableModels = []
+            return .failure(error)
         }
     }
 
-    func enhance(_ text: String, withSystemPrompt systemPrompt: String? = nil) async throws -> String {
+    func enhance(_ text: String, withSystemPrompt systemPrompt: String? = nil, model: String? = nil, timeout: TimeInterval = 30) async throws -> String {
         guard let systemPrompt = systemPrompt else {
             throw LocalAIError.invalidRequest
         }
@@ -75,14 +84,18 @@ class OllamaService: ObservableObject {
             throw LocalAIError.invalidURL
         }
 
+        let trimmedModel = model?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let requestModel = (trimmedModel?.isEmpty == false ? trimmedModel : nil) ?? selectedModel
+
         do {
             return try await OllamaClient.generate(
                 baseURL: url,
-                model: selectedModel,
+                model: requestModel,
                 prompt: text,
                 systemPrompt: systemPrompt,
                 temperature: defaultTemperature,
-                think: false
+                think: false,
+                timeout: timeout
             )
         } catch let error as LLMKitError {
             throw mapLLMKitError(error)
@@ -103,8 +116,10 @@ class OllamaService: ObservableObject {
             return .invalidResponse
         case .encodingError:
             return .invalidRequest
-        case .missingAPIKey, .timeout:
+        case .missingAPIKey:
             return .invalidResponse
+        case .timeout:
+            return .timeout
         }
     }
 }
@@ -117,6 +132,7 @@ enum LocalAIError: Error, LocalizedError {
     case modelNotFound
     case serverError
     case invalidRequest
+    case timeout
 
     var errorDescription: String? {
         switch self {
@@ -132,6 +148,8 @@ enum LocalAIError: Error, LocalizedError {
             return "Ollama server error"
         case .invalidRequest:
             return "System prompt is required"
+        case .timeout:
+            return "Ollama request timed out"
         }
     }
 }

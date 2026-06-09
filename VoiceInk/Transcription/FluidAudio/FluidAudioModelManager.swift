@@ -11,6 +11,7 @@ struct FluidAudioDownloadStatus {
 @MainActor
 class FluidAudioModelManager: ObservableObject {
     @Published private var downloadStatuses: [String: FluidAudioDownloadStatus] = [:]
+    @Published private var modelStateRevision = 0
     private var activeDownloadIDs: [String: UUID] = [:]
 
     var onModelDeleted: ((String) -> Void)?
@@ -26,6 +27,15 @@ class FluidAudioModelManager: ObservableObject {
 
     nonisolated static func asrVersion(for modelName: String) -> AsrModelVersion {
         modelVersionMap[modelName] ?? .v3
+    }
+
+    nonisolated static func languageHint(from languageCode: String?, for modelName: String) -> Language? {
+        guard asrVersion(for: modelName) == .v3,
+              let languageCode,
+              languageCode != "auto"
+        else { return nil }
+
+        return Language(rawValue: languageCode)
     }
 
     init() {}
@@ -80,6 +90,7 @@ class FluidAudioModelManager: ObservableObject {
                 version: version,
                 progressHandler: progressHandler
             )
+            modelStateRevision += 1
         } catch {
             logger.error("❌ FluidAudio download failed for \(modelName, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
@@ -99,6 +110,7 @@ class FluidAudioModelManager: ObservableObject {
         }
 
         // Notify TranscriptionModelManager to clear currentTranscriptionModel if it matches
+        modelStateRevision += 1
         onModelDeleted?(model.name)
     }
 

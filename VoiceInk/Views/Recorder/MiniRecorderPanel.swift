@@ -2,9 +2,9 @@ import SwiftUI
 import AppKit
 
 class MiniRecorderPanel: NSPanel {
-    override var canBecomeKey: Bool { false }
-    override var canBecomeMain: Bool { false }
-    
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+
     init(contentRect: NSRect) {
         super.init(
             contentRect: contentRect,
@@ -14,7 +14,7 @@ class MiniRecorderPanel: NSPanel {
         )
         configurePanel()
     }
-    
+
     private func configurePanel() {
         isFloatingPanel = true
         level = .floating
@@ -29,16 +29,16 @@ class MiniRecorderPanel: NSPanel {
         titleVisibility = .hidden
         standardWindowButton(.closeButton)?.isHidden = true
     }
-    
+
     static func calculateWindowMetrics() -> NSRect {
+        let width: CGFloat = 540
+        let height: CGFloat = 430
+
         guard let screen = NSScreen.main else {
-            return NSRect(x: 0, y: 0, width: 460, height: 320)
+            return NSRect(x: 0, y: 0, width: width, height: height)
         }
 
-        // Fixed window size, large enough to accommodate scrollable live
-        // transcript with chat-style speaker bubbles when active.
-        let width: CGFloat = 460
-        let height: CGFloat = 320
+        // Host stays large enough for assistant output; SwiftUI controls the visible mini width.
         let padding: CGFloat = 24
 
         let visibleFrame = screen.visibleFrame
@@ -59,8 +59,5 @@ class MiniRecorderPanel: NSPanel {
         setFrame(metrics, display: true)
         orderFrontRegardless()
     }
-    
-    func hide(completion: @escaping () -> Void) {
-        completion()
-    }
+
 }

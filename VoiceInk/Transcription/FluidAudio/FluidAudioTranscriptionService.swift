@@ -10,10 +10,17 @@ class FluidAudioTranscriptionService: TranscriptionService {
     private var activeVersion: AsrModelVersion?
     private var cachedModels: AsrModels?
     private var loadingTask: (version: AsrModelVersion, task: Task<AsrModels, Error>)?
-    private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink.fluidaudio", category: "FluidAudioTranscriptionService")
+    private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "FluidAudioTranscriptionService")
 
     private func version(for model: any TranscriptionModel) -> AsrModelVersion {
         FluidAudioModelManager.asrVersion(for: model.name)
+    }
+
+    static func languageHint(from selectedLanguage: String?, model: any TranscriptionModel) -> Language? {
+        guard model.provider == .fluidAudio else {
+            return nil
+        }
+        return FluidAudioModelManager.languageHint(from: selectedLanguage, for: model.name)
     }
 
     private func ensureModelsLoaded(for version: AsrModelVersion) async throws {
@@ -75,7 +82,7 @@ class FluidAudioTranscriptionService: TranscriptionService {
         try await ensureModelsLoaded(for: version(for: model))
     }
 
-    func transcribe(audioURL: URL, model: any TranscriptionModel) async throws -> String {
+    func transcribe(audioURL: URL, model: any TranscriptionModel, context: TranscriptionRequestContext) async throws -> String {
         let targetVersion = version(for: model)
         try await ensureModelsLoaded(for: targetVersion)
 
@@ -83,6 +90,10 @@ class FluidAudioTranscriptionService: TranscriptionService {
             throw ASRError.notInitialized
         }
 
+        let languageHint = Self.languageHint(
+            from: context.language,
+            model: model
+        )
         let audioSamples = try readAudioSamples(from: audioURL)
 
         let durationSeconds = Double(audioSamples.count) / 16000.0
@@ -119,7 +130,11 @@ class FluidAudioTranscriptionService: TranscriptionService {
         }
 
         var decoderState = TdtDecoderState.make(decoderLayers: await asrManager.decoderLayerCount)
-        let result = try await asrManager.transcribe(speechAudio, decoderState: &decoderState)
+        let result = try await asrManager.transcribe(
+            speechAudio,
+            decoderState: &decoderState,
+            language: languageHint
+        )
 
         return TextNormalizer.shared.normalizeSentence(result.text)
     }
