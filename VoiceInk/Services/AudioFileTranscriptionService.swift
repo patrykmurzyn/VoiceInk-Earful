@@ -14,24 +14,48 @@ class AudioTranscriptionService: ObservableObject {
     private let promptDetectionService = PromptDetectionService()
     private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "AudioTranscriptionService")
     private let serviceRegistry: TranscriptionServiceRegistry
+    private let whisperModelProvider: (any WhisperModelProvider)?
 
-    enum TranscriptionError: Error {
+    enum TranscriptionError: Error, LocalizedError {
         case noAudioFile
         case transcriptionFailed
         case modelNotLoaded
         case invalidAudioFormat
+        case mixedRetranscriptionRequiresWhisper
+
+        var errorDescription: String? {
+            switch self {
+            case .noAudioFile:
+                return "Audio file not found"
+            case .transcriptionFailed:
+                return "Transcription failed"
+            case .modelNotLoaded:
+                return "Model not loaded"
+            case .invalidAudioFormat:
+                return "Invalid audio format"
+            case .mixedRetranscriptionRequiresWhisper:
+                return "Mixed mic + system retranscription requires a Whisper model"
+            }
+        }
     }
 
     init(modelContext: ModelContext, engine: VoiceInkEngine) {
         self.modelContext = modelContext
         self.enhancementService = engine.enhancementService
         self.serviceRegistry = TranscriptionServiceRegistry(modelProvider: engine.whisperModelManager, modelsDirectory: engine.whisperModelManager.modelsDirectory, modelContext: modelContext)
+        self.whisperModelProvider = engine.whisperModelManager
     }
 
-    init(modelContext: ModelContext, serviceRegistry: TranscriptionServiceRegistry, enhancementService: AIEnhancementService?) {
+    init(
+        modelContext: ModelContext,
+        serviceRegistry: TranscriptionServiceRegistry,
+        enhancementService: AIEnhancementService?,
+        whisperModelProvider: (any WhisperModelProvider)? = nil
+    ) {
         self.modelContext = modelContext
         self.enhancementService = enhancementService
         self.serviceRegistry = serviceRegistry
+        self.whisperModelProvider = whisperModelProvider
     }
     
     func retranscribeAudio(from url: URL, using model: any TranscriptionModel) async throws -> Transcription {
@@ -45,7 +69,18 @@ class AudioTranscriptionService: ObservableObject {
         
         do {
             let transcriptionStart = Date()
-            var text = try await serviceRegistry.transcribe(audioURL: url, model: model)
+            let systemAudioURL = MixedAudioCompanion.existingSystemAudioURL(forPrimaryAudioURL: url)
+            var text: String
+            if let systemAudioURL {
+                guard model.provider == .whisper,
+                      let whisperModelProvider else {
+                    throw TranscriptionError.mixedRetranscriptionRequiresWhisper
+                }
+                let mixedTranscriber = MixedTranscriber(modelProvider: whisperModelProvider)
+                text = try await mixedTranscriber.transcribe(micURL: url, systemURL: systemAudioURL, model: model)
+            } else {
+                text = try await serviceRegistry.transcribe(audioURL: url, model: model)
+            }
             let transcriptionDuration = Date().timeIntervalSince(transcriptionStart)
             text = TranscriptionOutputFilter.filter(text)
             text = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -74,6 +109,12 @@ class AudioTranscriptionService: ObservableObject {
             
             do {
                 try FileManager.default.copyItem(at: url, to: permanentURL)
+                if let systemAudioURL {
+                    try FileManager.default.copyItem(
+                        at: systemAudioURL,
+                        to: MixedAudioCompanion.systemAudioURL(forPrimaryAudioURL: permanentURL)
+                    )
+                }
             } catch {
                 logger.error("❌ Failed to create permanent copy of audio: \(error.localizedDescription, privacy: .public)")
                 isTranscribing = false

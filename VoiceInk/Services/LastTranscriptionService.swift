@@ -122,7 +122,8 @@ class LastTranscriptionService: ObservableObject {
             let transcriptionService = AudioTranscriptionService(
                 modelContext: modelContext,
                 serviceRegistry: serviceRegistry,
-                enhancementService: enhancementService
+                enhancementService: enhancementService,
+                whisperModelProvider: transcriptionModelManager.whisperModelProvider
             )
             do {
                 let newTranscription = try await transcriptionService.retranscribeAudio(from: audioURL, using: currentModel)

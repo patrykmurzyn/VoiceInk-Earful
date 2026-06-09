@@ -66,13 +66,18 @@ class WaveformGenerator {
 }
 
 class AudioPlayerManager: ObservableObject {
-    private var audioPlayer: AVAudioPlayer?
+    private var primaryPlayer: AVAudioPlayer?
+    private var systemPlayer: AVAudioPlayer?
     private var timer: Timer?
+    private var waveformLoadID = UUID()
     @Published var isPlaying = false
     @Published var currentTime: TimeInterval = 0
     @Published var duration: TimeInterval = 0
     @Published var waveformSamples: [Float] = []
+    @Published var systemWaveformSamples: [Float] = []
     @Published var isLoadingWaveform = false
+    @Published var isLoadingSystemWaveform = false
+    @Published var hasSystemAudio = false
     @Published var playbackRate: Float = {
         let saved = UserDefaults.standard.float(forKey: "audioPlaybackRate")
         return saved > 0 ? saved : 1.0
@@ -82,17 +87,48 @@ class AudioPlayerManager: ObservableObject {
     
     func loadAudio(from url: URL) {
         do {
-            audioPlayer = try AVAudioPlayer(contentsOf: url)
-            audioPlayer?.enableRate = true
-            audioPlayer?.prepareToPlay()
-            duration = audioPlayer?.duration ?? 0
+            cleanup()
+            let loadID = UUID()
+            waveformLoadID = loadID
+            currentTime = 0
+            waveformSamples = []
+            systemWaveformSamples = []
+            hasSystemAudio = false
+
+            primaryPlayer = try AVAudioPlayer(contentsOf: url)
+            primaryPlayer?.enableRate = true
+            primaryPlayer?.prepareToPlay()
+            duration = primaryPlayer?.duration ?? 0
             isLoadingWaveform = true
+
+            if let systemURL = MixedAudioCompanion.existingSystemAudioURL(forPrimaryAudioURL: url) {
+                systemPlayer = try? AVAudioPlayer(contentsOf: systemURL)
+                systemPlayer?.enableRate = true
+                systemPlayer?.prepareToPlay()
+                if let systemDuration = systemPlayer?.duration {
+                    duration = max(duration, systemDuration)
+                }
+                hasSystemAudio = systemPlayer != nil
+                isLoadingSystemWaveform = systemPlayer != nil
+            }
             
             Task {
                 let samples = await WaveformGenerator.generateWaveformSamples(from: url)
                 await MainActor.run {
+                    guard self.waveformLoadID == loadID else { return }
                     self.waveformSamples = samples
                     self.isLoadingWaveform = false
+                }
+            }
+
+            if let systemURL = MixedAudioCompanion.existingSystemAudioURL(forPrimaryAudioURL: url), hasSystemAudio {
+                Task {
+                    let samples = await WaveformGenerator.generateWaveformSamples(from: systemURL)
+                    await MainActor.run {
+                        guard self.waveformLoadID == loadID else { return }
+                        self.systemWaveformSamples = samples
+                        self.isLoadingSystemWaveform = false
+                    }
                 }
             }
         } catch {
@@ -101,8 +137,11 @@ class AudioPlayerManager: ObservableObject {
     }
     
     func play() {
-        audioPlayer?.rate = playbackRate
-        audioPlayer?.play()
+        primaryPlayer?.rate = playbackRate
+        systemPlayer?.rate = playbackRate
+        let startAt = (primaryPlayer?.deviceCurrentTime ?? 0) + 0.05
+        primaryPlayer?.play(atTime: startAt)
+        systemPlayer?.play(atTime: startAt)
         isPlaying = true
         startTimer()
     }
@@ -113,24 +152,29 @@ class AudioPlayerManager: ObservableObject {
         case 1.5:  playbackRate = 2.0
         default:   playbackRate = 1.0
         }
-        audioPlayer?.rate = playbackRate
+        primaryPlayer?.rate = playbackRate
+        systemPlayer?.rate = playbackRate
     }
     
     func pause() {
-        audioPlayer?.pause()
+        primaryPlayer?.pause()
+        systemPlayer?.pause()
         isPlaying = false
         stopTimer()
     }
     
     func seek(to time: TimeInterval) {
-        audioPlayer?.currentTime = time
-        currentTime = time
+        let clamped = max(0, min(time, duration))
+        primaryPlayer?.currentTime = min(clamped, primaryPlayer?.duration ?? clamped)
+        systemPlayer?.currentTime = min(clamped, systemPlayer?.duration ?? clamped)
+        currentTime = clamped
     }
     
     private func startTimer() {
+        stopTimer()
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            self.currentTime = self.audioPlayer?.currentTime ?? 0
+            self.currentTime = max(self.primaryPlayer?.currentTime ?? 0, self.systemPlayer?.currentTime ?? 0)
             if self.currentTime >= self.duration {
                 self.pause()
                 self.seek(to: 0)
@@ -144,9 +188,13 @@ class AudioPlayerManager: ObservableObject {
     }
 
     func cleanup() {
+        waveformLoadID = UUID()
         stopTimer()
-        audioPlayer?.stop()
-        audioPlayer = nil
+        primaryPlayer?.stop()
+        systemPlayer?.stop()
+        primaryPlayer = nil
+        systemPlayer = nil
+        isPlaying = false
     }
 
     deinit {
@@ -165,6 +213,7 @@ struct WaveformView: View {
     let currentTime: TimeInterval
     let duration: TimeInterval
     let isLoading: Bool
+    var tint: Color = .primary
     var onSeek: (Double) -> Void
     @State private var isHovering = false
     @State private var hoverLocation: CGFloat = 0
@@ -184,13 +233,15 @@ struct WaveformView: View {
                 } else {
                     HStack(spacing: 0.5) {
                         ForEach(0..<samples.count, id: \.self) { index in
+                            let progress = duration > 0 ? CGFloat(currentTime / duration) : 0
                             WaveformBar(
                                 sample: samples[index],
-                                isPlayed: CGFloat(index) / CGFloat(samples.count) <= CGFloat(currentTime / duration),
+                                isPlayed: samples.isEmpty ? false : CGFloat(index) / CGFloat(samples.count) <= progress,
                                 totalBars: samples.count,
                                 geometryWidth: geometry.size.width,
                                 isHovering: isHovering,
-                                hoverProgress: hoverLocation / geometry.size.width
+                                hoverProgress: geometry.size.width > 0 ? hoverLocation / geometry.size.width : 0,
+                                tint: tint
                             )
                         }
                     }
@@ -199,18 +250,18 @@ struct WaveformView: View {
                     .padding(.horizontal, 2)
 
                     if isHovering {
-                        Text(formatTime(duration * Double(hoverLocation / geometry.size.width)))
+                        Text(formatTime(duration * Double(geometry.size.width > 0 ? hoverLocation / geometry.size.width : 0)))
                             .font(.system(size: 10, weight: .medium))
                             .monospacedDigit()
                             .foregroundColor(.white)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 3)
-                            .background(Capsule().fill(Color.accentColor))
+                            .background(Capsule().fill(tint))
                             .offset(x: max(0, min(hoverLocation - 25, geometry.size.width - 50)))
                             .offset(y: -26)
 
                         Rectangle()
-                            .fill(Color.accentColor)
+                            .fill(tint)
                             .frame(width: 2)
                             .frame(maxHeight: .infinity)
                             .offset(x: hoverLocation)
@@ -223,7 +274,8 @@ struct WaveformView: View {
                     .onChanged { value in
                         if !isLoading {
                             hoverLocation = value.location.x
-                            onSeek(Double(value.location.x / geometry.size.width) * duration)
+                            let progress = geometry.size.width > 0 ? Double(value.location.x / geometry.size.width) : 0
+                            onSeek(progress * duration)
                         }
                     }
             )
@@ -253,6 +305,7 @@ struct WaveformBar: View {
     let geometryWidth: CGFloat
     let isHovering: Bool
     let hoverProgress: CGFloat
+    let tint: Color
     
     private var isNearHover: Bool {
         let barPosition = geometryWidth / CGFloat(totalBars)
@@ -265,8 +318,8 @@ struct WaveformBar: View {
             .fill(
                 LinearGradient(
                     colors: [
-                        isPlayed ? Color.primary : Color.primary.opacity(0.3),
-                        isPlayed ? Color.primary.opacity(0.8) : Color.primary.opacity(0.2)
+                        isPlayed ? tint : tint.opacity(0.3),
+                        isPlayed ? tint.opacity(0.8) : tint.opacity(0.2)
                     ],
                     startPoint: .bottom,
                     endPoint: .top
@@ -278,6 +331,35 @@ struct WaveformBar: View {
             )
             .scaleEffect(y: isHovering && isNearHover ? 1.15 : 1.0)
             .animation(.interpolatingSpring(stiffness: 300, damping: 15), value: isHovering && isNearHover)
+    }
+}
+
+private struct WaveformTrackView: View {
+    let label: String
+    let samples: [Float]
+    let currentTime: TimeInterval
+    let duration: TimeInterval
+    let isLoading: Bool
+    let tint: Color
+    var onSeek: (Double) -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold))
+                .monospaced()
+                .foregroundStyle(tint)
+                .frame(width: 34, alignment: .trailing)
+
+            WaveformView(
+                samples: samples,
+                currentTime: currentTime,
+                duration: duration,
+                isLoading: isLoading,
+                tint: tint,
+                onSeek: onSeek
+            )
+        }
     }
 }
 
@@ -393,14 +475,39 @@ struct AudioPlayerView: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            WaveformView(
-                samples: playerManager.waveformSamples,
-                currentTime: playerManager.currentTime,
-                duration: playerManager.duration,
-                isLoading: playerManager.isLoadingWaveform,
-                onSeek: { playerManager.seek(to: $0) }
-            )
-            .padding(.horizontal, 10)
+            if playerManager.hasSystemAudio {
+                VStack(spacing: 4) {
+                    WaveformTrackView(
+                        label: "ME",
+                        samples: playerManager.waveformSamples,
+                        currentTime: playerManager.currentTime,
+                        duration: playerManager.duration,
+                        isLoading: playerManager.isLoadingWaveform,
+                        tint: .accentColor,
+                        onSeek: { playerManager.seek(to: $0) }
+                    )
+
+                    WaveformTrackView(
+                        label: "THEM",
+                        samples: playerManager.systemWaveformSamples,
+                        currentTime: playerManager.currentTime,
+                        duration: playerManager.duration,
+                        isLoading: playerManager.isLoadingSystemWaveform,
+                        tint: .secondary,
+                        onSeek: { playerManager.seek(to: $0) }
+                    )
+                }
+                .padding(.horizontal, 10)
+            } else {
+                WaveformView(
+                    samples: playerManager.waveformSamples,
+                    currentTime: playerManager.currentTime,
+                    duration: playerManager.duration,
+                    isLoading: playerManager.isLoadingWaveform,
+                    onSeek: { playerManager.seek(to: $0) }
+                )
+                .padding(.horizontal, 10)
+            }
 
             HStack(spacing: 8) {
                 Text(formatTime(playerManager.currentTime))
@@ -585,4 +692,3 @@ struct AudioPlayerView: View {
         }
     }
 }
-

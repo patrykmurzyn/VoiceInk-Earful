@@ -71,10 +71,9 @@ class TranscriptionAutoCleanupService {
 
         if let urlString = transcription.audioFileURL,
            let url = URL(string: urlString) {
-            do {
-                try FileManager.default.removeItem(at: url)
-            } catch {
-                logger.error("Failed to delete audio file: \(error.localizedDescription, privacy: .public)")
+            let removal = MixedAudioCompanion.removePrimaryAndCompanion(forPrimaryAudioURL: url)
+            if removal.didFail {
+                logger.error("Failed to delete \(removal.failedCount, privacy: .public) audio file(s)")
             }
         }
 
@@ -112,9 +111,11 @@ class TranscriptionAutoCleanupService {
             var deletedCount = 0
             for transcription in items {
                 if let urlString = transcription.audioFileURL,
-                   let url = URL(string: urlString),
-                   FileManager.default.fileExists(atPath: url.path) {
-                    try? FileManager.default.removeItem(at: url)
+                   let url = URL(string: urlString) {
+                    let removal = MixedAudioCompanion.removePrimaryAndCompanion(forPrimaryAudioURL: url)
+                    if removal.didFail {
+                        logger.error("Failed to delete \(removal.failedCount, privacy: .public) audio file(s) during old transcription cleanup")
+                    }
                 }
                 backgroundContext.delete(transcription)
                 deletedCount += 1
@@ -146,10 +147,13 @@ class TranscriptionAutoCleanupService {
             descriptor.propertiesToFetch = [\.audioFileURL]
 
             let transcriptions = try backgroundContext.fetch(descriptor)
-            let referencedFiles = Set(transcriptions.compactMap { transcription -> String? in
+            let referencedFiles = Set(transcriptions.flatMap { transcription -> [String] in
                 guard let urlString = transcription.audioFileURL,
-                      let url = URL(string: urlString) else { return nil }
-                return url.lastPathComponent
+                      let url = URL(string: urlString) else { return [] }
+                guard FileManager.default.fileExists(atPath: url.path) else {
+                    return [url.lastPathComponent]
+                }
+                return [url.lastPathComponent, MixedAudioCompanion.systemAudioURL(forPrimaryAudioURL: url).lastPathComponent]
             })
 
             guard FileManager.default.fileExists(atPath: recordingsDirectory.path) else { return }

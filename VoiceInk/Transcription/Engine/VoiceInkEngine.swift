@@ -121,7 +121,7 @@ class VoiceInkEngine: NSObject, ObservableObject {
                 } else {
                     currentSession?.cancel()
                     currentSession = nil
-                    try? FileManager.default.removeItem(at: recordedFile)
+                    MixedAudioCompanion.removePrimaryAndCompanion(forPrimaryAudioURL: recordedFile)
                     recordingState = .idle
                     await cleanupResources()
                 }

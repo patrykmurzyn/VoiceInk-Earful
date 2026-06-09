@@ -68,12 +68,19 @@ class AudioCleanupManager {
 
                 for transcription in transcriptions {
                     if let urlString = transcription.audioFileURL,
-                       let url = URL(string: urlString),
-                       FileManager.default.fileExists(atPath: url.path) {
-                        if let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
-                           let fileSize = attributes[.size] as? Int64 {
-                            totalSize += fileSize
-                            fileCount += 1
+                       let url = URL(string: urlString) {
+                        var transcriptionSize: Int64 = 0
+                        var transcriptionFileCount = 0
+                        for candidate in [url, MixedAudioCompanion.systemAudioURL(forPrimaryAudioURL: url)] where FileManager.default.fileExists(atPath: candidate.path) {
+                            if let attributes = try? FileManager.default.attributesOfItem(atPath: candidate.path),
+                               let fileSize = attributes[.size] as? Int64 {
+                                transcriptionSize += fileSize
+                                transcriptionFileCount += 1
+                            }
+                        }
+                        if transcriptionFileCount > 0 {
+                            totalSize += transcriptionSize
+                            fileCount += transcriptionFileCount
                             eligibleTranscriptions.append(transcription)
                         }
                     }
@@ -114,22 +121,24 @@ class AudioCleanupManager {
 
                 let transcriptions = try modelContext.fetch(descriptor)
                 var deletedCount = 0
+                var didUpdateTranscription = false
 
                 for transcription in transcriptions {
                     if let urlString = transcription.audioFileURL,
-                       let url = URL(string: urlString),
-                       FileManager.default.fileExists(atPath: url.path) {
-                        do {
-                            try FileManager.default.removeItem(at: url)
-                            transcription.audioFileURL = nil
-                            deletedCount += 1
-                        } catch {
-                            // Skip this file - don't update audioFileURL if deletion failed
+                       let url = URL(string: urlString) {
+                        let removal = MixedAudioCompanion.removePrimaryAndCompanion(forPrimaryAudioURL: url)
+                        if removal.didFail {
+                            continue
                         }
+                        if removal.deletedCount > 0 {
+                            deletedCount += removal.deletedCount
+                        }
+                        transcription.audioFileURL = nil
+                        didUpdateTranscription = true
                     }
                 }
 
-                if deletedCount > 0 {
+                if didUpdateTranscription {
                     try modelContext.save()
                 }
             }
@@ -150,22 +159,23 @@ class AudioCleanupManager {
             return try await MainActor.run {
                 var deletedCount = 0
                 var errorCount = 0
+                var didUpdateTranscription = false
 
                 for transcription in transcriptions {
                     if let urlString = transcription.audioFileURL,
-                       let url = URL(string: urlString),
-                       FileManager.default.fileExists(atPath: url.path) {
-                        do {
-                            try FileManager.default.removeItem(at: url)
-                            transcription.audioFileURL = nil
-                            deletedCount += 1
-                        } catch {
-                            errorCount += 1
+                       let url = URL(string: urlString) {
+                        let removal = MixedAudioCompanion.removePrimaryAndCompanion(forPrimaryAudioURL: url)
+                        if removal.didFail {
+                            errorCount += removal.failedCount
+                            continue
                         }
+                        deletedCount += removal.deletedCount
+                        transcription.audioFileURL = nil
+                        didUpdateTranscription = true
                     }
                 }
 
-                if deletedCount > 0 || errorCount > 0 {
+                if didUpdateTranscription {
                     try? modelContext.save()
                 }
 

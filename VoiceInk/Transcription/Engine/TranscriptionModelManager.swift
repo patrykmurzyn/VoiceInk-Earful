@@ -12,6 +12,10 @@ class TranscriptionModelManager: ObservableObject {
 
     private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "TranscriptionModelManager")
 
+    var whisperModelProvider: (any WhisperModelProvider)? {
+        whisperModelManager
+    }
+
     init(whisperModelManager: WhisperModelManager, fluidAudioModelManager: FluidAudioModelManager) {
         self.whisperModelManager = whisperModelManager
         self.fluidAudioModelManager = fluidAudioModelManager
